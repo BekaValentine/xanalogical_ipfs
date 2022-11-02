@@ -1,0 +1,21 @@
+* {
+  font-family: monospace;
+}
+
+a, a:visited {
+  color: blue;
+}
+
+#neutralinoapp {
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+}
+
+#my_stuff {
+  display: none;
+}
+
+#entity_view {
+  display: none;
+}

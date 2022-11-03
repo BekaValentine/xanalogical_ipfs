@@ -534,30 +534,6 @@ Feed.prototype.update_sequence_number = async function (sequence_number, updater
 
 
 
-//////////////// Index ////////////////
-
-function Index(cid, protocol_version, index_tree) {
-  this.cid = cid;
-  this.protocol_version = protocol_version;
-  this.index_tree = index_tree;
-}
-Index.cache = {};
-Index.load = async function (cid) {
-  if (!(cid in Index.cache)) {
-    let obj = JSON.parse(await IPFS.cat(cid));
-    let f = new Index(
-      cid,
-      obj.protocol_version,
-      obj.index_tree
-    );
-    Index.cache[cid] = f;
-  }
-
-  return Index.cache[cid];
-}
-
-
-
 //////////////// Users ////////////////
 
 function UserManager() {

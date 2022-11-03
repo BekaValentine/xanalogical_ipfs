@@ -70,20 +70,20 @@ IPFS.cat = async function (cid) {
 };
 IPFS.add = async function (obj) {
   let str = JSON.stringify(obj);
-  console.log(`Adding object: ${str}`);
+  // console.log(`Adding object: ${str}`);
   let cid = (await Neutralino.os.execCommand("ipfs add --quieter", {
     stdIn: str
   })).stdOut.trim();
-  console.log(`  Succeeded with cid: ${cid}`);
+  // console.log(`  Succeeded with cid: ${cid}`);
   return cid;
 };
 IPFS.resolve = async function () {
   return (await Neutralino.os.execCommand("ipfs name resolve")).stdOut.trim();
 }
 IPFS.publish = async function (cid) {
-  console.log(`Publishing cid: ${cid}`);
+  // console.log(`Publishing cid: ${cid}`);
   let res = (await Neutralino.os.execCommand(`ipfs name publish ${cid}`)).stdOut.trim();
-  console.log(`  Succeeded with: ${res}`);
+  // console.log(`  Succeeded with: ${res}`);
   return res;
 }
 
@@ -369,18 +369,16 @@ SearchSpineTree.load = async function (cid) {
 };
 SearchSpineTree.prototype.update_sequence_number = async function (sequence_number, updater) {
   // try to update here
-  if (this.first_local_sequence_number <= sequence_number && sequence_number <= this.last_local_sequence_number) {
-    console.log("Updating here.", this);
+  if (in_bounds(sequence_number, this.first_local_sequence_number, this.last_local_sequence_number)) {
     return await SearchSpineTree.make(
       this.first_local_sequence_number,
       this.last_local_sequence_number,
-      updater(this.first),
+      await updater(this.first),
       this.rest
     );
   }
 
   // otherwise try to update the rest
-  console.log("Updating in children.", this);
   for (let i = 0; i < this.rest.length; i++) {
     let entry = this.rest[i];
     if (in_bounds(sequence_number, entry.first_sequence_number, entry.last_sequence_number)) {
@@ -462,8 +460,10 @@ function Feed(cid, protocol_version, optimal_recent, next_sequence_number, recen
   this.protocol_version = protocol_version;
   this.optimal_recent = optimal_recent;
   this.next_sequence_number = next_sequence_number;
+
   // holds up to 2*this.optimal_recent-1. at 2*this.optimal_recent, it moves the oldest this.optimal_recent to a new feed segment
-  this.recent = recent;
+  this.recent = recent; // an array of objects like { sequence_number, item }
+
   this.older = older;
 }
 Feed.cache = {};
@@ -528,8 +528,50 @@ Feed.prototype.add = async function (item) {
     )
   };
 }
-Feed.prototype.update_sequence_number = async function (sequence_number, updater) {
+Feed.prototype.update_sequence_number = async function (sequence_number, item_updater) {
+  // try to update here first
+  for (let i = 0; i < this.recent.length; i++) {
+    let item = this.recent[i];
+    if (item.sequence_number == sequence_number) {
+      return await Feed.make(
+        this.protocol_version,
+        this.optimal_recent,
+        this.next_sequence_number,
+        [
+          ...this.recent.slice(0,i),
+          await item_update(item),
+          ...this.recent.slice(i+1)
+        ],
+        this.older
+      );
+    }
+  }
 
+  // otherwise update the older items stack
+  let collection_updater = async (collection) => {
+    for (let i = 0; i < collection.length; i++) {
+      let item = collection[i];
+      if (item.sequence_number == sequence_number) {
+        return [
+          ...collection.slice(0,i),
+          {
+            sequence_number: item.sequence_number,
+            item: await item_updater(item.item)
+          },
+          ...collection.slice(i+1)
+        ]
+      }
+    }
+
+    return collection;
+  };
+  return await Feed.make(
+    this.protocol_version,
+    this.optimal_recent,
+    this.next_sequence_number,
+    this.recent,
+    await this.older.update_sequence_number(sequence_number, collection_updater)
+  );
 };
 
 
@@ -544,12 +586,12 @@ function UserManager() {
 UserManager.prototype.load = async function () {
   let cid = await IPFS.resolve();
   if (cid == "" || cid == "/ipfs/bafkqaaa") {
-    console.log("Initializing user data to empty.");
+    // console.log("Initializing user data to empty.");
     this.feeds = {};
     this.indexes = {};
     this.store();
   } else {
-    console.log(`Loading pre-existing user data: ${cid}`);
+    // console.log(`Loading pre-existing user data: ${cid}`);
 
     let user_data = JSON.parse(await IPFS.cat(cid));
 
@@ -724,7 +766,7 @@ if (false) {
     );
 
     await user_profile_def.store();
-    console.log("User Profile Definition:", user_profile_def.cid);
+    // console.log("User Profile Definition:", user_profile_def.cid);
 
     let short_post_def = new EntityDefinition(
       null,
@@ -737,7 +779,7 @@ if (false) {
     );
 
     await short_post_def.store();
-    console.log("Short Post Definition:", short_post_def.cid);
+    // console.log("Short Post Definition:", short_post_def.cid);
 
     let comment_def = new EntityDefinition(
       null,
@@ -751,7 +793,7 @@ if (false) {
     );
 
     await comment_def.store();
-    console.log("Comment Definition:", comment_def.cid);
+    // console.log("Comment Definition:", comment_def.cid);
   })();
 }
 
@@ -780,21 +822,13 @@ if (true) {
     // let res = await user_manager.publish_entity(user_profile);
     // console.log("Successfully published user profile.", user_profile.cid);
 
-    // let f = await Feed.make_empty("v0", 2);
-    // for (let i = 0; i < 10; i++) {
-    //   f = (await f.add("item_" + i.toString())).new_feed;
-    // }
-    // console.json_log(f);
-
-    let s = new SearchSpineStack([]);
-    for (let i = 0; i < 3; i++) {
-      s = await s.push(i, i, "abcd"[i]);
+    let f = await Feed.make_empty("v0", 2);
+    for (let i = 0; i < 10; i++) {
+      f = (await f.add("item_" + i.toString())).new_feed;
     }
+    console.json_log(f);
 
-    console.json_log(s);
+    console.json_log(await f.update_sequence_number(5, x => x+x))
 
-    let s2 = await s.update_sequence_number(1, x => x+x);
-
-    console.json_log(s2);
   })();
 }

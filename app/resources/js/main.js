@@ -54,6 +54,14 @@ function deep_equality(a, b) {
 
 
 
+//////////////// Bounds ////////////////
+
+function in_bounds(x, a, b) {
+  return (a <= x && x <= b) || (b <= x && x <= a);
+}
+
+
+
 //////////////// IPFS ////////////////
 
 let IPFS = {};
@@ -344,25 +352,67 @@ EntityDefinition.prototype.check_entity = async function (ent) {
 
 //////////////// Search Spine Trees ////////////////
 
-function SearchSpineTree(cid, first, rest) {
+function SearchSpineTree(cid, first_local_sequence_number, last_local_sequence_number, first, rest) {
   this.cid = cid;
-  this.first = first;
-  this.rest = rest;
+  this.first_local_sequence_number = first_local_sequence_number;
+  this.last_local_sequence_number = last_local_sequence_number;
+  this.first = first; // some object
+  this.rest = rest; // an array of objects like { depth, first_sequence_number, last_sequence_number, item }
 }
-SearchSpineTree.make = async function (first, rest) {
-  let cid = await IPFS.add({ first, rest });
-  return new SearchSpineTree(cid, first, rest);
+SearchSpineTree.make = async function (first_local_sequence_number, last_local_sequence_number, first, rest) {
+  let cid = await IPFS.add({ first_local_sequence_number, last_local_sequence_number, first, rest });
+  return new SearchSpineTree(cid, first_local_sequence_number, last_local_sequence_number, first, rest);
 };
 SearchSpineTree.load = async function (cid) {
   let data = JSON.parse(await IPFS.cat(cid));
-  return new SearchSpineTree(cid, data.first, rest.rest);
+  return new SearchSpineTree(cid, data.first_local_sequence_number, data.last_local_sequence_number, data.first, data.rest);
+};
+SearchSpineTree.prototype.update_sequence_number = async function (sequence_number, updater) {
+  // try to update here
+  if (this.first_local_sequence_number <= sequence_number && sequence_number <= this.last_local_sequence_number) {
+    console.log("Updating here.", this);
+    return await SearchSpineTree.make(
+      this.first_local_sequence_number,
+      this.last_local_sequence_number,
+      updater(this.first),
+      this.rest
+    );
+  }
+
+  // otherwise try to update the rest
+  console.log("Updating in children.", this);
+  for (let i = 0; i < this.rest.length; i++) {
+    let entry = this.rest[i];
+    if (in_bounds(sequence_number, entry.first_sequence_number, entry.last_sequence_number)) {
+      let t = await SearchSpineTree.load(entry.item);
+      t2 = await t.update_sequence_number(sequence_number, updater);
+
+      let new_entry = {
+        depth: entry.depth,
+        first_sequence_number: entry.first_sequence_number,
+        last_sequence_number: entry.last_sequence_number,
+        item: t2.cid
+      };
+
+      let new_rest = [
+        ...this.rest.slice(0,i),
+        new_entry,
+        ...this.rest.slice(i+1)
+      ];
+
+      return await SearchSpineTree.make(this.first_local_sequence_number, this.last_local_sequence_number, this.first, new_rest);
+    }
+  }
+
+  // otherwise dont update anything
+  return this;
 };
 
 // these don't live on IPFs independently!
 function SearchSpineStack(items) {
-  this.items = items; // array of { depth, first_key, last_key, item }
+  this.items = items; // array of { depth, first_sequence_number, last_sequence_number, item }
 }
-SearchSpineStack.prototype.push = async function (first_key, last_key, first) {
+SearchSpineStack.prototype.push = async function (first_local_sequence_number, last_local_sequence_number, first) {
   let rest = [];
   let depth = 0;
   let new_items = [...this.items];
@@ -373,14 +423,35 @@ SearchSpineStack.prototype.push = async function (first_key, last_key, first) {
   }
 
   new_items.unshift({
-    depth,
-    first_key,
-    last_key: rest.length == 0 ? last_key : rest[rest.length-1].last_key,
-    item: (await SearchSpineTree.make(first, rest)).cid
+    depth: depth,
+    first_sequence_number: first_local_sequence_number,
+    last_sequence_number: rest.length == 0 ? last_local_sequence_number : rest[rest.length-1].last_sequence_number,
+    item: (await SearchSpineTree.make(first_local_sequence_number, last_local_sequence_number, first, rest)).cid
   });
 
   return new SearchSpineStack(new_items);
 }
+SearchSpineStack.prototype.update_sequence_number = async function (sequence_number, updater) {
+  for (let i = 0; i < this.items.length; i++) {
+    let item = this.items[i];
+    if (in_bounds(sequence_number, item.first_sequence_number, item.last_sequence_number)) {
+      let old_item = await SearchSpineTree.load(item.item);
+      let new_item = await old_item.update_sequence_number(sequence_number, updater);
+      return new SearchSpineStack([
+        ...this.items.slice(0,i),
+        {
+          depth: item.depth,
+          first_sequence_number: item.first_sequence_number,
+          last_sequence_number: item.last_sequence_number,
+          item: new_item.cid
+        },
+        ...this.items.slice(i+1)
+      ]);
+    }
+  }
+
+  return this;
+};
 
 
 
@@ -446,20 +517,27 @@ Feed.prototype.add = async function (item) {
     );
   }
 
-  return await Feed.make(
-    this.protocol_version,
-    this.optimal_recent,
-    this.next_sequence_number+1,
-    new_recent,
-    new_older
-  );
+  return {
+    new_sequence_number: this.next_sequence_number,
+    new_feed: await Feed.make(
+      this.protocol_version,
+      this.optimal_recent,
+      this.next_sequence_number+1,
+      new_recent,
+      new_older
+    )
+  };
 }
+Feed.prototype.update_sequence_number = async function (sequence_number, updater) {
+
+};
+
 
 
 //////////////// Index ////////////////
 
-function Index(protocol_version, index_tree) {
-  this.cid = null;
+function Index(cid, protocol_version, index_tree) {
+  this.cid = cid;
   this.protocol_version = protocol_version;
   this.index_tree = index_tree;
 }
@@ -468,9 +546,10 @@ Index.load = async function (cid) {
   if (!(cid in Index.cache)) {
     let obj = JSON.parse(await IPFS.cat(cid));
     let f = new Index(
-      obj.protocol_version
+      cid,
+      obj.protocol_version,
+      obj.index_tree
     );
-    f.cid = cid;
     Index.cache[cid] = f;
   }
 
@@ -725,10 +804,21 @@ if (true) {
     // let res = await user_manager.publish_entity(user_profile);
     // console.log("Successfully published user profile.", user_profile.cid);
 
-    let f = await Feed.make_empty("v0", 20);
-    for (let i = 0; i < 100; i++) {
-      f = await f.add("item_" + i.toString());
+    // let f = await Feed.make_empty("v0", 2);
+    // for (let i = 0; i < 10; i++) {
+    //   f = (await f.add("item_" + i.toString())).new_feed;
+    // }
+    // console.json_log(f);
+
+    let s = new SearchSpineStack([]);
+    for (let i = 0; i < 3; i++) {
+      s = await s.push(i, i, "abcd"[i]);
     }
-    console.json_log(f);
+
+    console.json_log(s);
+
+    let s2 = await s.update_sequence_number(1, x => x+x);
+
+    console.json_log(s2);
   })();
 }
